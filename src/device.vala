@@ -108,6 +108,7 @@ namespace Singularity.Nearby {
 
     public class Device : Object {
         public const string[] PLUGINS = { "share", "clipboard", "notifications", "battery", "findmyphone", "sms", "mpris", "runcommand", "ping" };
+        public const string[] PEER_PLUGINS = { "share", "ping" };
 
         public string id { get; construct; }
         public string name { get; set; default = ""; }
@@ -161,9 +162,18 @@ namespace Singularity.Nearby {
             }
         }
 
+        public bool is_computer {
+            get { return device_type != "phone" && device_type != "tablet"; }
+        }
+
+        private bool opt_in(string plugin) {
+            return plugin == "runcommand" || (is_computer && !(plugin in PEER_PLUGINS));
+        }
+
         public bool plugin_enabled(string plugin, SystemConfig system) {
             if (!paired || record == null) return false;
             if (plugin == "runcommand") return system.allow_run_commands && plugin in record.enabled_plugins;
+            if (opt_in(plugin)) return plugin in record.enabled_plugins;
             return !(plugin in record.disabled_plugins);
         }
 
@@ -173,7 +183,7 @@ namespace Singularity.Nearby {
             foreach (string p in record.disabled_plugins) if (p != plugin) disabled += p;
             string[] enabled = {};
             foreach (string p in record.enabled_plugins) if (p != plugin) enabled += p;
-            if (plugin == "runcommand") {
+            if (opt_in(plugin)) {
                 if (on) enabled += plugin;
             } else if (!on) {
                 disabled += plugin;
