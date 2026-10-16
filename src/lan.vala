@@ -20,6 +20,7 @@ namespace Singularity.Nearby {
         private TrustLookup trust;
         private AcceptPolicy accept;
         private Gee.HashSet<string> connecting = new Gee.HashSet<string>();
+        private Gee.HashMap<string, Link> links = new Gee.HashMap<string, Link>();
 
         public signal void link_ready(Link link);
 
@@ -166,6 +167,8 @@ namespace Singularity.Nearby {
             if (port < system.tcp_port_min || port > system.tcp_port_max) return;
             if (!accept(device_id)) return;
             if (connecting.contains(device_id)) return;
+            var current = links[device_id];
+            if (current != null && current.open) return;
             connect_to.begin(address, port, device_id, protocol);
         }
 
@@ -259,8 +262,15 @@ namespace Singularity.Nearby {
             string cn = NearbyCerts.common_name(tls.peer_certificate.certificate_pem);
             if (cn != device_id) throw new IOError.PERMISSION_DENIED("certificate is for %s", cn);
             var link = new Link(device_id, tls, address, secure);
+            links[device_id] = link;
+            link.closed.connect(forget_link);
             link.start(reader);
             link_ready(link);
+        }
+
+        private void forget_link(Link link) {
+            link.closed.disconnect(forget_link);
+            if (links[link.device_id] == link) links.unset(link.device_id);
         }
 
         private static void set_keepalive(SocketConnection conn) {
