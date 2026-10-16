@@ -165,7 +165,6 @@ namespace Singularity.Nearby {
         public void collab_ask(string summary, string body, owned NotificationAction answer) {
             var hints = new HashTable<string, Variant>(str_hash, str_equal);
             hints["urgency"] = new Variant.byte(2);
-            hints["resident"] = new Variant.boolean(true);
             desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, summary, body,
                 { "accept", _("Accept"), "decline", _("Decline") }, hints, 0, (owned) answer);
         }
