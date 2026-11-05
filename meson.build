@@ -10,6 +10,7 @@ gio_dep = dependency('gio-2.0')
 gio_unix_dep = dependency('gio-unix-2.0')
 json_dep = dependency('json-glib-1.0')
 gee_dep = dependency('gee-0.8')
+soup_dep = dependency('libsoup-3.0')
 gnutls_dep = dependency('gnutls', version: '>= 3.6')
 posix_dep = meson.get_compiler('vala').find_library('posix')
 
@@ -27,7 +28,7 @@ helpers = static_library('nearby-helpers', 'src/certs.c', 'src/netif.c',
 )
 
 vala_args = ['--vapidir=' + meson.current_source_dir() / 'src', '--pkg=certs', '--pkg=netif']
-deps = [glib_dep, gio_dep, gio_unix_dep, json_dep, gee_dep, posix_dep]
+deps = [glib_dep, gio_dep, gio_unix_dep, json_dep, gee_dep, posix_dep, soup_dep]
 
 core_sources = [build_config] + files(
   'src/packet.vala',
@@ -47,6 +48,7 @@ service_sources = core_sources + files(
     'src/obex.vala',
     'src/service.vala',
     'src/collab.vala',
+    'src/relay.vala',
 )
 
 executable('singularity-nearby',

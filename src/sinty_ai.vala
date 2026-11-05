@@ -4,6 +4,9 @@ namespace Singularity.Nearby {
 
     public class SintyAi : Object {
         public const string PLUGIN = "sinty-ai";
+        public const string PREFIX = "sinty.ai.";
+        public const string ROOM = "sinty.ai.room";
+        public const string PUSH = "sinty.ai.push";
         public const string CONVERSATIONS = "sinty.ai.conversations";
         public const string HISTORY = "sinty.ai.history";
         public const string ASK = "sinty.ai.ask";
@@ -13,8 +16,8 @@ namespace Singularity.Nearby {
         public const string REPLY = "sinty.ai.reply";
         public const string STOP = "sinty.ai.stop";
         public const string STATUS = "sinty.ai.status";
-        public const string[] INCOMING = { CONVERSATIONS, HISTORY, ASK, ANSWER, STOP, STATUS };
-        public const string[] OUTGOING = { CONVERSATIONS, HISTORY, STEP, CONFIRM, REPLY, STATUS };
+        public const string[] INCOMING = { CONVERSATIONS, HISTORY, ASK, ANSWER, STOP, STATUS, PUSH };
+        public const string[] OUTGOING = { CONVERSATIONS, HISTORY, STEP, CONFIRM, REPLY, STATUS, ROOM };
 
         private const string AGENT = "dev.sinty.Agent";
         private const string AGENT_PATH = "/dev/sinty/Agent";
@@ -32,6 +35,12 @@ namespace Singularity.Nearby {
         private Subprocess? job = null;
         private bool stopped_here = false;
         private Gee.HashSet<uint32> forwarded = new Gee.HashSet<uint32>();
+        private string waiting_for = "";
+        private Packet? pending_confirm = null;
+        private Packet? open_confirm = null;
+        private Packet? pending_reply = null;
+
+        public signal void wake(Device d, string kind);
 
         public SintyAi(owned SintyAiSend send, string binary, string store) {
             this.send = (owned) send;
@@ -95,6 +104,27 @@ namespace Singularity.Nearby {
 
         public void connected(Device d) {
             send(d, status());
+            if (open_confirm != null && pending_confirm == null && device != null && device.id == d.id) send(d, open_confirm);
+            if (waiting_for != d.id) return;
+            if (pending_confirm != null) send(d, pending_confirm);
+            if (pending_reply != null) send(d, pending_reply);
+            pending_confirm = null;
+            pending_reply = null;
+            waiting_for = "";
+        }
+
+        private void deliver(Device d, Packet p, string kind) {
+            if (d.reachable) {
+                send(d, p);
+                return;
+            }
+            waiting_for = d.id;
+            if (p.packet_type == CONFIRM) {
+                pending_confirm = p.get_bool("closed") ? null : p;
+            } else {
+                pending_reply = p;
+            }
+            if (kind != "") wake(d, kind);
         }
 
         public void forget(Device d) {
@@ -201,7 +231,7 @@ namespace Singularity.Nearby {
         private void reply(Device d, string id, string text, string error = "") {
             var p = new Packet(REPLY).set_string("conversation", id).set_string("text", text);
             if (error != "") p.set_string("error", error);
-            send(d, p);
+            deliver(d, p, "reply");
         }
 
         private async Variant? agent(string method, Variant? args, VariantType? reply_type) throws Error {
@@ -277,6 +307,7 @@ namespace Singularity.Nearby {
             device = null;
             label = "";
             forwarded.clear();
+            open_confirm = null;
             if (stopped_here) {
                 stopped_here = false;
                 try {
@@ -345,17 +376,19 @@ namespace Singularity.Nearby {
             p.set_string("text", text.substring(prefix.length));
             p.set_string("risk", risk_of(id));
             forwarded.add(id);
-            send(device, p);
+            open_confirm = p;
+            deliver(device, p, "confirm");
         }
 
         private void on_closed(DBusConnection conn, string? sender, string path, string iface, string name, Variant parameters) {
             uint32 id;
             parameters.get("(u)", out id);
             if (!forwarded.remove(id) || device == null) return;
+            if (open_confirm != null && open_confirm.get_int("id") == id) open_confirm = null;
             var p = new Packet(CONFIRM);
             p.set_int("id", id);
             p.set_bool("closed", true);
-            send(device, p);
+            deliver(device, p, "");
         }
 
         private void on_intent(DBusConnection conn, string? sender, string path, string iface, string name, Variant parameters) {

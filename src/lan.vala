@@ -234,7 +234,22 @@ namespace Singularity.Nearby {
             }
         }
 
-        private async void finish(TlsConnection tls, InetAddress address, string device_id, int protocol) throws Error {
+        public async void relayed(SocketConnection stream, string device_id, int protocol) {
+            string? trusted = trust(device_id);
+            try {
+                if (trusted == null) throw new IOError.PERMISSION_DENIED("only paired devices come through the relay");
+                var tls = yield Tls.handshake(stream, false, own, trusted, null);
+                yield finish(tls, new InetAddress.any(SocketFamily.IPV4), device_id, protocol, true);
+            } catch (Error e) {
+                debug("nearby: relayed connection from %s refused: %s", device_id, e.message);
+                try {
+                    stream.close();
+                } catch (Error e2) {
+                }
+            }
+        }
+
+        private async void finish(TlsConnection tls, InetAddress address, string device_id, int protocol, bool relayed = false) throws Error {
             size_t written;
             yield tls.output_stream.write_all_async(identity().serialize().data, Priority.DEFAULT, null, out written);
             var reader = new DataInputStream(tls.input_stream);
@@ -259,6 +274,7 @@ namespace Singularity.Nearby {
             string cn = NearbyCerts.common_name(tls.peer_certificate.certificate_pem);
             if (cn != device_id) throw new IOError.PERMISSION_DENIED("certificate is for %s", cn);
             var link = new Link(device_id, tls, address, secure);
+            link.relayed = relayed;
             link.start(reader);
             link_ready(link);
         }

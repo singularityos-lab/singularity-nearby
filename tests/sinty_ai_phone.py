@@ -1,4 +1,4 @@
-import json, os, socket, ssl, subprocess, sys, tempfile, threading, time, uuid
+import base64, hashlib, hmac, json, os, socket, ssl, struct, subprocess, sys, tempfile, threading, time, uuid
 from gi.repository import Gio, GLib
 
 if len(sys.argv) > 1 and sys.argv[1] == "fake-sinty":
@@ -15,6 +15,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "fake-sinty":
         return r["isError"], r["content"][0]["text"]
     if text == "wait":
         time.sleep(60)
+    if text == "slow":
+        time.sleep(6)
     e1, _ = tool("app_invoke", app="dev.sinty.fake", intent="note", args={"text": text})
     e2, t2 = tool("app_invoke", app="dev.sinty.fake", intent="send", args={})
     path = os.path.join(os.environ["XDG_STATE_HOME"], "sinty-agent", "conversations")
@@ -48,10 +50,12 @@ if len(sys.argv) > 1 and sys.argv[1] == "fake-app":
     sys.exit(0)
 
 NEARBY, AGENT = sys.argv[1], sys.argv[2]
+RELAY = sys.argv[3] if len(sys.argv) > 3 else ""
+RELAY_LOG = sys.argv[4] if len(sys.argv) > 4 else ""
 work = tempfile.mkdtemp()
 PORT = 17180
 with open(work + "/nearby.conf", "w") as f:
-    f.write("[Nearby]\nEnabled=true\nDiscovery=\nUdpPort=%d\nTcpPorts=%d;%d;\nTransferPorts=%d;%d;\n" % (PORT, PORT, PORT + 4, PORT + 5, PORT + 9))
+    f.write("[Nearby]\nEnabled=true\nDiscovery=\nUdpPort=%d\nTcpPorts=%d;%d;\nTransferPorts=%d;%d;\nRelay=%s\n" % (PORT, PORT, PORT + 4, PORT + 5, PORT + 9, RELAY))
 env = dict(os.environ, HOME=work, XDG_CONFIG_HOME=work + "/config", XDG_DATA_HOME=work + "/data", XDG_CACHE_HOME=work + "/cache",
            XDG_STATE_HOME=work + "/state", SINGULARITY_NEARBY_CONF=work + "/nearby.conf")
 with open(work + "/sinty", "w") as f:
@@ -194,10 +198,146 @@ check("Stop from the phone ends the work", r is not None, [p for p in packets[n:
 st = json.loads(bus.call_sync("dev.sinty.Agent", "/dev/sinty/Agent", "dev.sinty.Agent1", "GetStatus", None, GLib.VariantType("(s)"), Gio.DBusCallFlags.NONE, 5000).unpack()[0])
 check("the agent runs again after a phone Stop", st["stopped"] is False, st)
 
+room_packets = [p["body"] for p in packets if p["type"] == "sinty.ai.room"]
+secret = room_packets[-1]["secret"] if room_packets else ""
+check("the desktop shares a room secret inside TLS", len(base64.b64decode(secret or "")) == 32, room_packets)
+
+class RelayPhone:
+    def __init__(self, url, room):
+        host, port = url.split("//")[1].split(":")
+        self.sock = socket.create_connection((host, int(port)), timeout=30)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall(("GET /v1/room/%s?role=phone HTTP/1.1\r\nHost: %s:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                           "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (room, host, port, key)).encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += self.sock.recv(1)
+        self.ok = head.startswith(b"HTTP/1.1 101")
+        self.inc, self.out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(work + "/phone.crt", work + "/phone.key")
+        ctx.verify_mode = ssl.CERT_NONE
+        self.tls = ctx.wrap_bio(self.inc, self.out, server_side=True)
+        self.ready = False
+        self.lock = threading.Lock()
+        self.buf = b""
+        self.texts = []
+        self.packets = []
+        threading.Thread(target=self.loop, daemon=True).start()
+    def frame(self, op, data):
+        mask = os.urandom(4)
+        n = len(data)
+        head = bytes([0x80 | op]) + (bytes([0x80 | n]) if n < 126 else (bytes([0x80 | 126]) + struct.pack(">H", n) if n < 65536 else bytes([0x80 | 127]) + struct.pack(">Q", n)))
+        self.sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+    def recv_exact(self, n):
+        d = b""
+        while len(d) < n:
+            c = self.sock.recv(n - len(d))
+            if not c:
+                raise EOFError
+            d += c
+        return d
+    def flush(self):
+        data = self.out.read()
+        if data:
+            self.frame(2, data)
+    def loop(self):
+        try:
+            while True:
+                b0, b1 = self.recv_exact(2)
+                n = b1 & 0x7F
+                if n == 126:
+                    n = struct.unpack(">H", self.recv_exact(2))[0]
+                elif n == 127:
+                    n = struct.unpack(">Q", self.recv_exact(8))[0]
+                data = self.recv_exact(n)
+                op = b0 & 0x0F
+                if op == 1:
+                    self.texts.append(data.decode())
+                    continue
+                if op == 9:
+                    with self.lock:
+                        self.frame(10, data)
+                    continue
+                if op == 8:
+                    return
+                if op != 2:
+                    continue
+                with self.lock:
+                    self.inc.write(data)
+                    if not self.ready:
+                        try:
+                            self.tls.do_handshake()
+                            self.ready = True
+                            self.tls.write((json.dumps(identity()) + "\n").encode())
+                        except ssl.SSLWantReadError:
+                            pass
+                    if self.ready:
+                        try:
+                            while True:
+                                self.buf += self.tls.read(65536)
+                        except ssl.SSLWantReadError:
+                            pass
+                    self.flush()
+                while b"\n" in self.buf:
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    p = json.loads(line)
+                    self.packets.append(p)
+                    if p["type"] == "sinty.ai.confirm" and not p["body"].get("closed"):
+                        self.send("sinty.ai.answer", id=p["body"]["id"], choice="allow")
+        except (EOFError, OSError, ValueError):
+            return
+    def send(self, kind, **body):
+        with self.lock:
+            self.tls.write((json.dumps({"id": int(time.time() * 1000), "type": kind, "body": body}) + "\n").encode())
+            self.flush()
+    def wait(self, kind, since=0, cond=lambda b: True, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            for p in self.packets[since:]:
+                if p["type"] == kind and cond(p["body"]):
+                    return p["body"]
+            time.sleep(0.05)
+        return None
+    def close(self):
+        try:
+            with self.lock:
+                self.frame(8, struct.pack(">H", 1001))
+            self.sock.shutdown(socket.SHUT_RDWR)
+            self.sock.close()
+        except OSError:
+            pass
+
+if RELAY and secret:
+    room = hmac.new(secret.encode(), b"sinty-ai-room", hashlib.sha256).hexdigest()
+    tls.close(); raw.close()
+    time.sleep(2)
+    phone = RelayPhone(RELAY, room)
+    check("the relay lets the phone into the room", phone.ok)
+    ident = phone.wait("kdeconnect.identity", timeout=20)
+    check("the desktop answers through the relay with the pinned certificate", ident is not None and ident["deviceId"] == desktop["body"]["deviceId"], ident)
+    phone.send("sinty.ai.status")
+    check("Sinty AI packets cross the relay", phone.wait("sinty.ai.status") is not None)
+    phone.send("kdeconnect.ping", message="hi")
+    phone.send("sinty.ai.push", token="ab" * 32)
+    n = len(phone.packets)
+    phone.send("sinty.ai.ask", conversation=conv, text="slow", mode="ask")
+    check("the phone starts work through the relay", phone.wait("sinty.ai.status", n, lambda b: b["busy"]) is not None)
+    phone.close()
+    time.sleep(12)
+    log = open(RELAY_LOG).read() if os.path.exists(RELAY_LOG) else ""
+    check("the desktop asks the relay to wake the phone", "/v1/push/" + room in log, log[-600:])
+    phone = RelayPhone(RELAY, room)
+    r = phone.wait("sinty.ai.reply", 0, lambda b: b.get("conversation") == conv, timeout=40)
+    check("after waking up the phone answers the pending question and gets the reply", r is not None and r.get("text") == "note done, send done", (r, phone.packets[-5:]))
+    phone.close()
+    send = None
+
 nearby("SetPluginEnabled", GLib.Variant("(ssb)", (device_id, "sinty-ai", False)))
-n = len(packets)
-send("sinty.ai.ask", conversation=conv, text="salva", mode="ask")
-check("with the plugin off the phone is ignored", wait("sinty.ai.reply", n, timeout=3) is None)
+if send is not None:
+    n = len(packets)
+    send("sinty.ai.ask", conversation=conv, text="salva", mode="ask")
+    check("with the plugin off the phone is ignored", wait("sinty.ai.reply", n, timeout=3) is None)
 
 for p in procs:
     p.terminate()

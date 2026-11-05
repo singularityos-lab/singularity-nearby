@@ -12,6 +12,7 @@ namespace Singularity.Nearby {
         public string device_type { get; set; default = ""; }
         public bool allow_run_commands { get; set; default = true; }
         public string[] extra_addresses { get; set; default = {}; }
+        public string relay { get; set; default = ""; }
         public string? source { get; private set; default = null; }
 
         public static string[] search_paths() {
@@ -68,6 +69,7 @@ namespace Singularity.Nearby {
                 if (kf.has_key(G, "DeviceType")) device_type = kf.get_string(G, "DeviceType");
                 if (kf.has_key(G, "AllowRunCommands")) allow_run_commands = kf.get_boolean(G, "AllowRunCommands");
                 if (kf.has_key(G, "Addresses")) extra_addresses = kf.get_string_list(G, "Addresses");
+                if (kf.has_key(G, "Relay")) relay = kf.get_string(G, "Relay").strip();
             } catch (Error e) {
                 warning("nearby.conf: %s", e.message);
             }
@@ -98,6 +100,8 @@ namespace Singularity.Nearby {
         public string[] enabled_plugins { get; set; default = {}; }
         public bool always_allow_files { get; set; default = false; }
         public string last_address { get; set; default = ""; }
+        public string room_secret { get; set; default = ""; }
+        public string push_token { get; set; default = ""; }
 
         public DeviceRecord(string id) {
             Object(id: id);
@@ -145,6 +149,8 @@ namespace Singularity.Nearby {
                 if (kf.has_key(group, "EnabledPlugins")) r.enabled_plugins = kf.get_string_list(group, "EnabledPlugins");
                 if (kf.has_key(group, "AlwaysAllowFiles")) r.always_allow_files = kf.get_boolean(group, "AlwaysAllowFiles");
                 if (kf.has_key(group, "Address")) r.last_address = kf.get_string(group, "Address");
+                if (kf.has_key(group, "RoomSecret")) r.room_secret = kf.get_string(group, "RoomSecret");
+                if (kf.has_key(group, "PushToken")) r.push_token = kf.get_string(group, "PushToken");
                 string cert_path = Path.build_filename(dir, "devices", id + ".pem");
                 string pem;
                 if (FileUtils.get_contents(cert_path, out pem)) r.certificate = pem;
@@ -236,6 +242,8 @@ namespace Singularity.Nearby {
                 kf.set_string_list(group, "EnabledPlugins", r.enabled_plugins);
                 kf.set_boolean(group, "AlwaysAllowFiles", r.always_allow_files);
                 kf.set_string(group, "Address", r.last_address);
+                if (r.room_secret != "") kf.set_string(group, "RoomSecret", r.room_secret);
+                if (r.push_token != "") kf.set_string(group, "PushToken", r.push_token);
                 FileUtils.set_contents_full(Path.build_filename(devices_dir, r.id + ".pem"), r.certificate, -1, FileSetContentsFlags.CONSISTENT, 0600);
             }
             FileUtils.set_contents_full(Path.build_filename(dir, "nearby.ini"), kf.to_data(), -1, FileSetContentsFlags.CONSISTENT, 0600);

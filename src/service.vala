@@ -36,6 +36,7 @@ namespace Singularity.Nearby {
         private ReceivedHistory history;
         private Gee.ArrayList<TransferInfo> transfers = new Gee.ArrayList<TransferInfo>();
         private SintyAi sinty_ai;
+        private Gee.HashMap<string, RelayClient> relays = new Gee.HashMap<string, RelayClient>();
 
         [DBus (visible = false)]
         public Collab collab { get; private set; }
@@ -137,6 +138,10 @@ namespace Singularity.Nearby {
             collab = new Collab(this, config.dir);
             sinty_ai = new SintyAi((d, p) => send(d, p), Environment.get_variable("SINTY_BINARY") ?? "/usr/bin/sinty",
                 Path.build_filename(Environment.get_user_state_dir(), "sinty-agent", "conversations"));
+            sinty_ai.wake.connect((d, kind) => {
+                var relay = relays[d.id];
+                if (relay != null && d.record != null) relay.push.begin(d.record.push_token, kind);
+            });
         }
 
         [DBus (visible = false)]
@@ -175,6 +180,7 @@ namespace Singularity.Nearby {
         [DBus (visible = false)]
         public void start() throws Error {
             lan.start();
+            refresh_relays();
             lan.set_discoverable(config.discoverable);
             refresh_discovery();
             Timeout.add_seconds(30, () => {
@@ -261,8 +267,8 @@ namespace Singularity.Nearby {
             }
             d.apply_identity(link.identity);
             d.link = link;
-            d.address = link.address.to_string();
-            if (d.record != null) {
+            if (!link.relayed) d.address = link.address.to_string();
+            if (d.record != null && !link.relayed) {
                 d.record.name = d.name;
                 d.record.device_type = d.device_type;
                 d.record.protocol_version = d.protocol_version;
@@ -292,7 +298,9 @@ namespace Singularity.Nearby {
         }
 
         private void send(Device d, Packet p) {
-            if (d.link != null) d.link.send(p);
+            if (d.link == null) return;
+            if (d.link.relayed && !p.packet_type.has_prefix(SintyAi.PREFIX)) return;
+            d.link.send(p);
         }
 
         private void on_connected(Device d) {
@@ -306,7 +314,53 @@ namespace Singularity.Nearby {
             if (d.plugin_enabled("notifications", system)) send(d, new Packet(Packet.NOTIFICATION_REQUEST).set_bool("request", true));
             if (d.plugin_enabled("mpris", system)) send(d, new Packet(Packet.MPRIS_REQUEST).set_bool("requestPlayerList", true));
             if (d.plugin_enabled("runcommand", system)) send_commands(d);
-            if (d.plugin_enabled(SintyAi.PLUGIN, system)) sinty_ai.connected(d);
+            if (d.plugin_enabled(SintyAi.PLUGIN, system)) {
+                if (!d.link.relayed) share_room(d);
+                sinty_ai.connected(d);
+            }
+        }
+
+        private void share_room(Device d) {
+            if (d.record.room_secret == "") {
+                var raw = new uint8[32];
+                try {
+                    size_t got;
+                    File.new_for_path("/dev/urandom").read().read_all(raw, out got);
+                    if (got != raw.length) return;
+                } catch (Error e) {
+                    warning("nearby: no randomness for the relay room: %s", e.message);
+                    return;
+                }
+                d.record.room_secret = Base64.encode(raw);
+                save();
+                refresh_relays();
+            }
+            send(d, new Packet(SintyAi.ROOM).set_string("secret", d.record.room_secret));
+        }
+
+        private void refresh_relays() {
+            var wanted = new Gee.HashSet<string>();
+            if (system.relay != "") {
+                foreach (var r in config.trusted.values) {
+                    if (r.room_secret == "" || !(SintyAi.PLUGIN in r.enabled_plugins)) continue;
+                    wanted.add(r.id);
+                    if (relays.has_key(r.id)) continue;
+                    var relay = new RelayClient(r.id, system.relay, r.room_secret);
+                    string id = r.id;
+                    relay.stream_ready.connect((stream) => {
+                        var rec = config.trusted[id];
+                        if (rec == null) return;
+                        lan.relayed.begin(stream, id, rec.protocol_version);
+                    });
+                    relays[r.id] = relay;
+                    relay.start();
+                }
+            }
+            foreach (var id in relays.keys.to_array()) {
+                if (wanted.contains(id)) continue;
+                relays[id].stop();
+                relays.unset(id);
+            }
         }
 
         private void send_battery(Device d) {
@@ -321,6 +375,7 @@ namespace Singularity.Nearby {
         }
 
         private void on_packet(Device d, Packet p) {
+            if (d.link != null && d.link.relayed && !p.packet_type.has_prefix(SintyAi.PREFIX)) return;
             if (p.packet_type == Packet.PAIR) {
                 handle_pair(d, p);
                 return;
@@ -384,6 +439,15 @@ namespace Singularity.Nearby {
                     break;
                 case LanTransport.PACKET:
                     if (collab.enabled) collab.lan.handle(d, p);
+                    break;
+                case SintyAi.PUSH:
+                    if (d.plugin_enabled(SintyAi.PLUGIN, system) && d.record != null) {
+                        string token = p.get_string("token", "") ?? "";
+                        if (token.length <= 200 && token != d.record.push_token) {
+                            d.record.push_token = token;
+                            save();
+                        }
+                    }
                     break;
                 default:
                     if (SintyAi.handles(p.packet_type) && d.plugin_enabled(SintyAi.PLUGIN, system)) sinty_ai.handle(d, p);
@@ -485,8 +549,13 @@ namespace Singularity.Nearby {
 
         private void untrust(Device d) {
             sinty_ai.forget(d);
+            if (d.record != null) {
+                d.record.room_secret = "";
+                d.record.push_token = "";
+            }
             end_pairing(d, PairState.NONE);
             config.forget(d.id);
+            refresh_relays();
             d.record = null;
             save();
             foreach (var n in d.notifications.values) desktop.close(n.local_id);
@@ -1069,6 +1138,7 @@ namespace Singularity.Nearby {
             d.set_plugin(plugin, enabled);
             save();
             if (plugin == SintyAi.PLUGIN && !enabled) sinty_ai.forget(d);
+            if (plugin == SintyAi.PLUGIN) refresh_relays();
             if (enabled && d.reachable) on_connected(d);
             device_changed(id);
         }

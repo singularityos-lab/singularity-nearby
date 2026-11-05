@@ -45,6 +45,7 @@ namespace Singularity.Nearby {
         public InetAddress address { get; construct; }
         public Packet identity { get; set; }
         public bool open { get; private set; default = true; }
+        public bool relayed { get; set; default = false; }
         public int64 last_activity { get; private set; default = GLib.get_monotonic_time(); }
 
         private DataInputStream reader;
