@@ -38,6 +38,7 @@ core_sources = [build_config] + files(
   'src/device.vala',
   'src/transfers.vala',
   'src/history.vala',
+  'src/sinty_ai.vala',
 )
 
 service_sources = core_sources + files(

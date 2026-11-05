@@ -35,6 +35,7 @@ namespace Singularity.Nearby {
         private int64 clipboard_time = 0;
         private ReceivedHistory history;
         private Gee.ArrayList<TransferInfo> transfers = new Gee.ArrayList<TransferInfo>();
+        private SintyAi sinty_ai;
 
         [DBus (visible = false)]
         public Collab collab { get; private set; }
@@ -134,6 +135,8 @@ namespace Singularity.Nearby {
             });
             lan.link_ready.connect(on_link);
             collab = new Collab(this, config.dir);
+            sinty_ai = new SintyAi((d, p) => send(d, p), Environment.get_variable("SINTY_BINARY") ?? "/usr/bin/sinty",
+                Path.build_filename(Environment.get_user_state_dir(), "sinty-agent", "conversations"));
         }
 
         [DBus (visible = false)]
@@ -204,6 +207,7 @@ namespace Singularity.Nearby {
                 Packet.NOTIFICATION, Packet.BATTERY, Packet.BATTERY_REQUEST, Packet.FINDMYPHONE, Packet.SMS_MESSAGES,
                 Packet.MPRIS, Packet.MPRIS_REQUEST, Packet.RUNCOMMAND_REQUEST
             });
+            p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), SintyAi.INCOMING));
             if (collab != null && collab.enabled) {
                 p.set_strv("incomingCapabilities", append(p.get_strv("incomingCapabilities"), LanTransport.PACKET));
             }
@@ -213,6 +217,7 @@ namespace Singularity.Nearby {
                 Packet.FINDMYPHONE, Packet.SMS_REQUEST, Packet.SMS_CONVERSATIONS, Packet.SMS_CONVERSATION,
                 Packet.MPRIS, Packet.MPRIS_REQUEST, Packet.RUNCOMMAND
             });
+            p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), SintyAi.OUTGOING));
             if (collab != null && collab.enabled) {
                 p.set_strv("outgoingCapabilities", append(p.get_strv("outgoingCapabilities"), LanTransport.PACKET));
             }
@@ -222,6 +227,12 @@ namespace Singularity.Nearby {
         private static string[] append(string[] list, string item) {
             string[] out = list;
             out += item;
+            return out;
+        }
+
+        private static string[] append_all(string[] list, string[] items) {
+            string[] out = list;
+            foreach (string item in items) out += item;
             return out;
         }
 
@@ -295,6 +306,7 @@ namespace Singularity.Nearby {
             if (d.plugin_enabled("notifications", system)) send(d, new Packet(Packet.NOTIFICATION_REQUEST).set_bool("request", true));
             if (d.plugin_enabled("mpris", system)) send(d, new Packet(Packet.MPRIS_REQUEST).set_bool("requestPlayerList", true));
             if (d.plugin_enabled("runcommand", system)) send_commands(d);
+            if (d.plugin_enabled(SintyAi.PLUGIN, system)) sinty_ai.connected(d);
         }
 
         private void send_battery(Device d) {
@@ -374,6 +386,7 @@ namespace Singularity.Nearby {
                     if (collab.enabled) collab.lan.handle(d, p);
                     break;
                 default:
+                    if (SintyAi.handles(p.packet_type) && d.plugin_enabled(SintyAi.PLUGIN, system)) sinty_ai.handle(d, p);
                     break;
             }
         }
@@ -471,6 +484,7 @@ namespace Singularity.Nearby {
         }
 
         private void untrust(Device d) {
+            sinty_ai.forget(d);
             end_pairing(d, PairState.NONE);
             config.forget(d.id);
             d.record = null;
@@ -1054,6 +1068,7 @@ namespace Singularity.Nearby {
             if (!(plugin in Device.PLUGINS)) throw new NearbyError.NOT_FOUND(_("Unknown feature %s").printf(plugin));
             d.set_plugin(plugin, enabled);
             save();
+            if (plugin == SintyAi.PLUGIN && !enabled) sinty_ai.forget(d);
             if (enabled && d.reachable) on_connected(d);
             device_changed(id);
         }

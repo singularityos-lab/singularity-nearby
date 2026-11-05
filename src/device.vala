@@ -107,7 +107,7 @@ namespace Singularity.Nearby {
     }
 
     public class Device : Object {
-        public const string[] PLUGINS = { "share", "clipboard", "notifications", "battery", "findmyphone", "sms", "mpris", "runcommand", "ping" };
+        public const string[] PLUGINS = { "share", "clipboard", "notifications", "battery", "findmyphone", "sms", "mpris", "runcommand", "ping", "sinty-ai" };
         public const string[] PEER_PLUGINS = { "share", "ping" };
 
         public string id { get; construct; }
@@ -167,7 +167,7 @@ namespace Singularity.Nearby {
         }
 
         private bool opt_in(string plugin) {
-            return plugin == "runcommand" || (is_computer && !(plugin in PEER_PLUGINS));
+            return plugin == "runcommand" || plugin == SintyAi.PLUGIN || (is_computer && !(plugin in PEER_PLUGINS));
         }
 
         public bool plugin_enabled(string plugin, SystemConfig system) {
@@ -239,6 +239,7 @@ namespace Singularity.Nearby {
             foreach (string p in PLUGINS) if (plugin_enabled(p, system)) enabled += p;
             d["plugins"] = enabled;
             d["supports-sms"] = incoming.length == 0 || Packet.SMS_REQUEST in incoming;
+            d["supports-sinty-ai"] = SintyAi.supported_by(incoming);
             d["supports-find"] = incoming.length == 0 || Packet.FINDMYPHONE in incoming;
             d["supports-media"] = players.size > 0;
             d["has-conversations"] = threads.size > 0;
