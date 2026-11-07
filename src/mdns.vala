@@ -126,6 +126,10 @@ namespace Singularity.Nearby {
         }
 
         public void query() {
+            query_name(SERVICE, TYPE_PTR);
+        }
+
+        private void query_name(string name, uint16 type) {
             if (socket == null) return;
             var b = new ByteArray();
             put16(b, 0);
@@ -134,8 +138,8 @@ namespace Singularity.Nearby {
             put16(b, 0);
             put16(b, 0);
             put16(b, 0);
-            DnsName.write(b, SERVICE);
-            put16(b, TYPE_PTR);
+            DnsName.write(b, name);
+            put16(b, type);
             put16(b, 1);
             send(b);
         }
@@ -154,7 +158,8 @@ namespace Singularity.Nearby {
                     var s = new Socket(SocketFamily.IPV4, SocketType.DATAGRAM, SocketProtocol.UDP);
                     s.multicast_ttl = 255;
                     s.multicast_loopback = false;
-                    s.bind(new InetSocketAddress.from_string(f[1], 0), false);
+                    s.set_option(1, 15, 1);
+                    s.bind(new InetSocketAddress.from_string(f[1], PORT), true);
                     s.send_to(target, b.data);
                     s.close();
                     sent = true;
@@ -311,6 +316,9 @@ namespace Singularity.Nearby {
                     hosts[lname] = "%u.%u.%u.%u".printf(d[rd], d[rd + 1], d[rd + 2], d[rd + 3]);
                 }
                 p += rdlen;
+            }
+            foreach (string inst in ptrs) {
+                if (!ports.has_key(inst) && inst != instance_name.down()) query_name(inst, TYPE_SRV);
             }
             foreach (var entry in ports.entries) {
                 string inst = entry.key;
