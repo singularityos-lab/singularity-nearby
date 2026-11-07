@@ -245,6 +245,15 @@ namespace Singularity.Nearby {
             parse(buf[0:n], sender.address);
         }
 
+        public bool answers(string name, uint16 qtype) {
+            string lname = name.down();
+            bool any = qtype == 255;
+            if (lname == SERVICE) return any || qtype == TYPE_PTR;
+            if (lname == instance_name.down()) return any || qtype == TYPE_SRV || qtype == TYPE_TXT;
+            if (lname == host_name.down()) return any || qtype == TYPE_A;
+            return false;
+        }
+
         public void parse(uint8[] d, InetAddress sender) {
             if (d.length < 12) return;
             uint16 flags = get16(d, 2);
@@ -257,7 +266,7 @@ namespace Singularity.Nearby {
                 if (name == null || p + 4 > d.length) return;
                 uint16 qtype = get16(d, p);
                 p += 4;
-                if ((qtype == TYPE_PTR || qtype == 255) && name.down() == SERVICE) asked = true;
+                if (answers(name, qtype)) asked = true;
             }
             if ((flags & 0x8000) == 0) {
                 if (asked) announce();

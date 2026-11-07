@@ -143,6 +143,19 @@ void test_mdns_parse() {
     assert(found_address == "10.77.0.2");
 }
 
+void test_mdns_answers() {
+    var m = new Mdns();
+    m.instance = "self_self_self_self_self_self_self";
+    assert(m.answers("_kdeconnect._udp.local", 12));
+    assert(m.answers("self_self_self_self_self_self_self._kdeconnect._udp.local", 33));
+    assert(m.answers("Self_self_self_self_self_self_self._kdeconnect._udp.local", 16));
+    assert(m.answers("self_self_self_self_self_self_self.local", 1));
+    assert(m.answers("self_self_self_self_self_self_self.local", 255));
+    assert(!m.answers("self_self_self_self_self_self_self.local", 28));
+    assert(!m.answers("peer_peer_peer_peer_peer_peer_pe._kdeconnect._udp.local", 33));
+    assert(!m.answers("_kdeconnect._udp.local", 33));
+}
+
 void test_dns_compression() {
     uint8[] data = { 3, 'f', 'o', 'o', 5, 'l', 'o', 'c', 'a', 'l', 0, 3, 'b', 'a', 'r', 0xc0, 0 };
     int pos = 11;
@@ -253,6 +266,7 @@ int main(string[] args) {
     Test.add_func("/nearby/pairing/code", test_verification_code);
     Test.add_func("/nearby/pairing/certificates", test_certificates);
     Test.add_func("/nearby/mdns/parse", test_mdns_parse);
+    Test.add_func("/nearby/mdns/answers", test_mdns_answers);
     Test.add_func("/nearby/mdns/compression", test_dns_compression);
     Test.add_func("/nearby/files/names", test_file_names);
     Test.add_func("/nearby/plugins/toggles", test_plugins);
