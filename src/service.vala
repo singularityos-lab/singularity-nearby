@@ -36,6 +36,7 @@ namespace Singularity.Nearby {
         private ReceivedHistory history;
         private Gee.ArrayList<TransferInfo> transfers = new Gee.ArrayList<TransferInfo>();
         private SintyAi sinty_ai;
+        private SintyScreen screen;
         private Gee.HashMap<string, RelayClient> relays = new Gee.HashMap<string, RelayClient>();
 
         [DBus (visible = false)]
@@ -138,6 +139,22 @@ namespace Singularity.Nearby {
             collab = new Collab(this, config.dir);
             sinty_ai = new SintyAi((d, p) => send(d, p), Environment.get_variable("SINTY_BINARY") ?? "/usr/bin/sinty",
                 Path.build_filename(Environment.get_user_state_dir(), "sinty-agent", "conversations"));
+            screen = new SintyScreen((d, p) => send(d, p), (summary, body, allow, answer) => {
+                var hints = new HashTable<string, Variant>(str_hash, str_equal);
+                hints["urgency"] = new Variant.byte(2);
+                desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, summary, body,
+                    { "accept", allow, "decline", _("Not Now") }, hints, 0, (owned) answer);
+            }, () => config.device_name, (d) => d.link != null && !d.link.relayed ? d.link.address : null, system_bus(),
+                Environment.get_variable("SINTY_SCREEN_BINARY") ?? "/usr/bin/sinty-screen",
+                Path.build_filename(Environment.get_user_data_dir(), "sinty-screen"));
+            screen.capabilities_changed.connect(() => {
+                refresh_discovery();
+                devices_changed();
+            });
+            screen.viewing_changed.connect((d) => device_changed(d.id));
+            screen.failed.connect((d, message) => {
+                desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Share the Screen with %s").printf(d.name), message, {});
+            });
             sinty_ai.wake.connect((d, kind) => {
                 var relay = relays[d.id];
                 if (relay != null && d.record != null) relay.push.begin(d.record.push_token, kind);
@@ -214,6 +231,7 @@ namespace Singularity.Nearby {
                 Packet.MPRIS, Packet.MPRIS_REQUEST, Packet.RUNCOMMAND_REQUEST
             });
             p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), SintyAi.INCOMING));
+            if (screen != null) p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), screen.incoming()));
             if (collab != null && collab.enabled) {
                 p.set_strv("incomingCapabilities", append(p.get_strv("incomingCapabilities"), LanTransport.PACKET));
             }
@@ -224,6 +242,7 @@ namespace Singularity.Nearby {
                 Packet.MPRIS, Packet.MPRIS_REQUEST, Packet.RUNCOMMAND
             });
             p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), SintyAi.OUTGOING));
+            if (screen != null) p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), screen.outgoing()));
             if (collab != null && collab.enabled) {
                 p.set_strv("outgoingCapabilities", append(p.get_strv("outgoingCapabilities"), LanTransport.PACKET));
             }
@@ -240,6 +259,15 @@ namespace Singularity.Nearby {
             string[] out = list;
             foreach (string item in items) out += item;
             return out;
+        }
+
+        private static DBusConnection? system_bus() {
+            try {
+                return Bus.get_sync(BusType.SYSTEM);
+            } catch (Error e) {
+                debug("nearby: no system bus: %s", e.message);
+                return null;
+            }
         }
 
         private void refresh_discovery() {
@@ -440,6 +468,10 @@ namespace Singularity.Nearby {
                 case LanTransport.PACKET:
                     if (collab.enabled) collab.lan.handle(d, p);
                     break;
+                case SintyScreen.OFFER:
+                case SintyScreen.REQUEST:
+                    screen.handle(d, p);
+                    break;
                 case SintyAi.PUSH:
                     if (d.plugin_enabled(SintyAi.PLUGIN, system) && d.record != null) {
                         string token = p.get_string("token", "") ?? "";
@@ -549,6 +581,7 @@ namespace Singularity.Nearby {
 
         private void untrust(Device d) {
             sinty_ai.forget(d);
+            screen.forget(d);
             if (d.record != null) {
                 d.record.room_secret = "";
                 d.record.push_token = "";
@@ -1004,12 +1037,20 @@ namespace Singularity.Nearby {
             var sorted = new Gee.ArrayList<Device>();
             sorted.add_all(devices.values);
             sorted.sort((a, b) => a.paired != b.paired ? (a.paired ? -1 : 1) : strcmp(a.name.collate_key(), b.name.collate_key()));
-            foreach (var d in sorted) result += d.to_dict(system);
+            foreach (var d in sorted) result += describe(d);
             return result;
         }
 
         public HashTable<string, Variant> get_device(string id) throws NearbyError, DBusError, IOError {
-            return require(id).to_dict(system);
+            return describe(require(id));
+        }
+
+        private HashTable<string, Variant> describe(Device d) {
+            var dict = d.to_dict(system);
+            dict["can-show-desktop-on"] = screen.can_show_on(d);
+            dict["can-show-desktop-of"] = screen.can_show_from(d);
+            dict["showing-desktop-of"] = screen.showing(d);
+            return dict;
         }
 
         public void refresh() throws DBusError, IOError {
@@ -1055,6 +1096,18 @@ namespace Singularity.Nearby {
             var p = new Packet(Packet.PING);
             if (message != "") p.set_string("message", message);
             send(require_paired(id, "ping"), p);
+        }
+
+        public void show_desktop_on(string id) throws NearbyError, DBusError, IOError {
+            screen.offer(require_paired(id));
+        }
+
+        public async void show_desktop_of(string id) throws Error {
+            yield screen.show_from(require_paired(id));
+        }
+
+        public void stop_desktop_of(string id) throws NearbyError, DBusError, IOError {
+            screen.stop(require(id));
         }
 
         public void ring(string id) throws NearbyError, DBusError, IOError {

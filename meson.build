@@ -49,6 +49,7 @@ service_sources = core_sources + files(
     'src/service.vala',
     'src/collab.vala',
     'src/relay.vala',
+    'src/screen.vala',
 )
 
 executable('singularity-nearby',
@@ -102,6 +103,18 @@ collab_test = executable('nearby-collab-test',
 )
 test('nearby-collab', find_program('dbus-run-session'),
   args: ['--', collab_test],
+  env: ['TMPDIR=' + meson.current_build_dir()],
+)
+
+screen_test = executable('nearby-screen-test',
+  service_sources + files('tests/screen_test.vala'),
+  dependencies: deps,
+  link_with: helpers,
+  include_directories: include_directories('src'),
+  vala_args: vala_args,
+)
+test('nearby-screen', find_program('dbus-run-session'),
+  args: ['--', screen_test],
   env: ['TMPDIR=' + meson.current_build_dir()],
 )
 
