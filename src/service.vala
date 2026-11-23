@@ -37,6 +37,7 @@ namespace Singularity.Nearby {
         private Gee.ArrayList<TransferInfo> transfers = new Gee.ArrayList<TransferInfo>();
         private SintyAi sinty_ai;
         private SintyScreen screen;
+        private AppMove app_move;
         private InputShare input;
         private Gee.HashMap<string, RelayClient> relays = new Gee.HashMap<string, RelayClient>();
 
@@ -53,6 +54,7 @@ namespace Singularity.Nearby {
         public signal void conversations_changed(string device_id);
         public signal void media_changed(string device_id);
         public signal void notifications_changed(string device_id);
+        public signal void app_arrived(string device_id, string app_id);
         public signal void transfer_started(string transfer_id, string device_id, string name, int64 size, bool incoming);
         public signal void received_files_changed();
         public signal void edge_pushed(string output, string side, double position, double length);
@@ -169,6 +171,15 @@ namespace Singularity.Nearby {
             });
             devices_changed.connect(() => input.refresh());
             screen.capabilities_changed.connect(() => input.refresh());
+            app_move = new AppMove((d, p) => send(d, p), (d) => d.link != null && !d.link.relayed, new TlsMovePayload(config, system), bus, config, Environment.get_home_dir());
+            app_move.started.connect((tid, d, app_id, incoming) => {
+                string name = app_label(app_id);
+                track(tid, d.id, name, 0, incoming);
+                transfer_started(tid, d.id, name, 0, incoming);
+            });
+            app_move.progress.connect((tid, done, total) => transfer_progress(tid, done, total));
+            app_move.finished.connect((tid, ok, message) => transfer_finished(tid, ok, message));
+            app_move.arrived.connect((d, app_id) => app_arrived(d.id, app_id));
             sinty_ai.wake.connect((d, kind) => {
                 var relay = relays[d.id];
                 if (relay != null && d.record != null) relay.push.begin(d.record.push_token, kind);
@@ -247,6 +258,7 @@ namespace Singularity.Nearby {
             });
             p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), SintyAi.INCOMING));
             if (screen != null) p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), screen.incoming()));
+            if (app_move != null) p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), app_move.capabilities()));
             if (collab != null && collab.enabled) {
                 p.set_strv("incomingCapabilities", append(p.get_strv("incomingCapabilities"), LanTransport.PACKET));
             }
@@ -258,6 +270,7 @@ namespace Singularity.Nearby {
             });
             p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), SintyAi.OUTGOING));
             if (screen != null) p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), screen.outgoing()));
+            if (app_move != null) p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), app_move.capabilities()));
             if (collab != null && collab.enabled) {
                 p.set_strv("outgoingCapabilities", append(p.get_strv("outgoingCapabilities"), LanTransport.PACKET));
             }
@@ -326,6 +339,7 @@ namespace Singularity.Nearby {
                 link.disconnect(closed_handler);
                 if (d.link != link) return;
                 d.link = null;
+                app_move.forget(d);
                 if (d.pair_state == PairState.REQUESTED || d.pair_state == PairState.INCOMING) end_pairing(d, PairState.NONE);
                 foreach (var n in d.notifications.values) desktop.close(n.local_id);
                 d.notifications.clear();
@@ -487,6 +501,10 @@ namespace Singularity.Nearby {
                 case SintyScreen.REQUEST:
                     screen.handle(d, p);
                     break;
+                case AppMove.OFFER:
+                case AppMove.RESULT:
+                    app_move.handle(d, p);
+                    break;
                 case SintyAi.PUSH:
                     if (d.plugin_enabled(SintyAi.PLUGIN, system) && d.record != null) {
                         string token = p.get_string("token", "") ?? "";
@@ -597,6 +615,7 @@ namespace Singularity.Nearby {
         private void untrust(Device d) {
             sinty_ai.forget(d);
             screen.forget(d);
+            app_move.forget(d);
             input.forget_device(d);
             if (d.record != null) {
                 d.record.room_secret = "";
@@ -1066,6 +1085,7 @@ namespace Singularity.Nearby {
             dict["can-show-desktop-on"] = screen.can_show_on(d);
             dict["can-show-desktop-of"] = screen.can_show_from(d);
             dict["showing-desktop-of"] = screen.showing(d);
+            dict["can-move-apps"] = app_move.can_move_to(d);
             dict["can-share-input"] = input.can_place(d);
             var place = input.place_of(d);
             if (place != null) {
@@ -1137,6 +1157,30 @@ namespace Singularity.Nearby {
 
         public void remove_input(string id) throws DBusError, IOError {
             input.remove(id);
+        }
+
+        public async bool can_move_app(string app_id) throws DBusError, IOError {
+            return yield app_move.supports(app_id);
+        }
+
+        public string move_app(string id, string app_id) throws NearbyError, DBusError, IOError {
+            var d = require_paired(id);
+            if (!app_move.can_move_to(d)) throw new NearbyError.NOT_REACHABLE(_("%s cannot take apps from this device").printf(d.name));
+            if (!GLib.Application.id_is_valid(app_id)) throw new NearbyError.FAILED(_("This app cannot move"));
+            string tid = Uuid.string_random();
+            app_move.move.begin(d, tid, app_id, (o, r) => {
+                try {
+                    app_move.move.end(r);
+                } catch (Error e) {
+                    desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Move %s to %s").printf(app_label(app_id), d.name), e.message, {});
+                }
+            });
+            return tid;
+        }
+
+        private static string app_label(string app_id) {
+            var info = new DesktopAppInfo(app_id + ".desktop");
+            return info != null ? info.get_display_name() : app_id;
         }
 
         public void stop_desktop_of(string id) throws NearbyError, DBusError, IOError {

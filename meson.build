@@ -23,11 +23,11 @@ build_config = configure_file(
   configuration: build_conf,
 )
 
-helpers = static_library('nearby-helpers', 'src/certs.c', 'src/netif.c',
+helpers = static_library('nearby-helpers', 'src/certs.c', 'src/netif.c', 'src/envelope.c',
   dependencies: [glib_dep, gio_dep, gnutls_dep],
 )
 
-vala_args = ['--vapidir=' + meson.current_source_dir() / 'src', '--pkg=certs', '--pkg=netif']
+vala_args = ['--vapidir=' + meson.current_source_dir() / 'src', '--pkg=certs', '--pkg=netif', '--pkg=envelope']
 deps = [glib_dep, gio_dep, gio_unix_dep, json_dep, gee_dep, posix_dep, soup_dep]
 
 core_sources = [build_config] + files(
@@ -50,6 +50,7 @@ service_sources = core_sources + files(
     'src/collab.vala',
     'src/relay.vala',
     'src/screen.vala',
+    'src/app_move.vala',
     'src/input_share.vala',
 )
 
@@ -94,6 +95,24 @@ packet_test = executable('nearby-packet-test',
   vala_args: vala_args,
 )
 test('nearby-packet', packet_test, env: ['TMPDIR=' + meson.current_build_dir()])
+
+envelope_test = executable('nearby-envelope-test',
+  files('tests/envelope_test.vala'),
+  dependencies: deps,
+  link_with: helpers,
+  include_directories: include_directories('src'),
+  vala_args: vala_args,
+)
+test('nearby-envelope', envelope_test)
+
+app_move_test = executable('nearby-app-move-test',
+  service_sources + files('tests/app_move_test.vala'),
+  dependencies: deps,
+  link_with: helpers,
+  include_directories: include_directories('src'),
+  vala_args: vala_args,
+)
+test('nearby-app-move', app_move_test, env: ['TMPDIR=' + meson.current_build_dir()], timeout: 300)
 
 collab_test = executable('nearby-collab-test',
   service_sources + files('tests/collab_test.vala'),
