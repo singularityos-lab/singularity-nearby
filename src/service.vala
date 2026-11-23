@@ -38,6 +38,10 @@ namespace Singularity.Nearby {
         private SintyAi sinty_ai;
         private SintyScreen screen;
         private AppMove app_move;
+        private string? dragged_device = null;
+        private string? dragged_app = null;
+        private bool dragged_movable = false;
+        private uint drag_serial = 0;
         private InputShare input;
         private Gee.HashMap<string, RelayClient> relays = new Gee.HashMap<string, RelayClient>();
 
@@ -58,6 +62,7 @@ namespace Singularity.Nearby {
         public signal void transfer_started(string transfer_id, string device_id, string name, int64 size, bool incoming);
         public signal void received_files_changed();
         public signal void edge_pushed(string output, string side, double position, double length);
+        public signal void app_dragged(string device_id, string app_id, string state, bool movable, string output, string side, double position);
 
         public string id { owned get { return config.device_id; } }
         public string name {
@@ -168,6 +173,9 @@ namespace Singularity.Nearby {
             input.pushed.connect((output, side, position, length) => edge_pushed(output, side, position, length));
             input.failed.connect((d, message) => {
                 desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Place %s Beside This Screen").printf(d.name), message, {});
+            });
+            input.window_dragged.connect((id, state, app_id, pid, output, side, fraction) => {
+                window_dragged.begin(id, state, app_id, output, side, fraction);
             });
             devices_changed.connect(() => input.refresh());
             screen.capabilities_changed.connect(() => input.refresh());
@@ -1176,6 +1184,44 @@ namespace Singularity.Nearby {
                 }
             });
             return tid;
+        }
+
+        private async void window_dragged(string id, string state, string app_id, string output, string side, double fraction) {
+            if (state == "entered") {
+                var d = devices[id];
+                var place = d != null ? input.place_of(d) : null;
+                double position = place != null ? place.start + fraction * (place.end - place.start) : 0;
+                dragged_device = id;
+                dragged_app = app_id;
+                dragged_movable = false;
+                uint serial = ++drag_serial;
+                bool movable = d != null && app_move.can_move_to(d) && yield app_move.supports(app_id);
+                if (serial != drag_serial) return;
+                dragged_movable = movable;
+                app_dragged(id, app_id, state, movable, output, side, position);
+                return;
+            }
+            if (dragged_device != id || dragged_app == null) return;
+            string app = dragged_app;
+            bool movable = dragged_movable;
+            drag_serial++;
+            dragged_device = null;
+            dragged_app = null;
+            dragged_movable = false;
+            app_dragged(id, app, state, movable, "", "", 0);
+            if (state != "dropped") return;
+            var d = devices[id];
+            if (d == null) return;
+            if (!movable) {
+                desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Move %s to %s").printf(app_label(app), d.name),
+                    _("This app cannot continue on another device."), {});
+                return;
+            }
+            try {
+                move_app(id, app);
+            } catch (Error e) {
+                desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Move %s to %s").printf(app_label(app), d.name), e.message, {});
+            }
         }
 
         private static string app_label(string app_id) {

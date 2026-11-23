@@ -32,6 +32,7 @@ namespace Singularity.Nearby {
         public signal void changed(string id);
         public signal void pushed(string output, string side, double position, double length);
         public signal void failed(Device d, string message);
+        public signal void window_dragged(string id, string state, string app_id, int pid, string output, string side, double fraction);
 
         public InputShare(SintyScreen screen, owned InputDevices devices, owned ScreenName own_name, string binary, string state, string config_dir) {
             this.screen = screen;
@@ -289,6 +290,12 @@ namespace Singularity.Nearby {
                 case "pushed":
                     pushed(o.get_string_member_with_default("output", ""), o.get_string_member_with_default("side", ""),
                         o.get_double_member_with_default("position", 0), o.get_double_member_with_default("length", 0));
+                    break;
+                case "window":
+                    if (!places.has_key(id)) break;
+                    window_dragged(id, o.get_string_member_with_default("state", ""), o.get_string_member_with_default("app_id", ""),
+                        (int) o.get_int_member_with_default("pid", 0), o.get_string_member_with_default("output", ""),
+                        o.get_string_member_with_default("side", ""), o.get_double_member_with_default("fraction", 0));
                     break;
                 case "connected":
                 case "left":
