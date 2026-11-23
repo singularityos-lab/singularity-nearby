@@ -24,12 +24,16 @@ namespace Singularity.Nearby {
         private DBusConnection? system_bus = null;
         private bool core_running = false;
         private Gee.HashMap<string, string> invites = new Gee.HashMap<string, string>();
-        private Gee.HashSet<string> requested = new Gee.HashSet<string>();
+        private Gee.HashMap<string, string> requested = new Gee.HashMap<string, string>();
         private Gee.HashMap<string, Subprocess> viewers = new Gee.HashMap<string, Subprocess>();
 
         public signal void capabilities_changed();
         public signal void failed(Device d, string message);
         public signal void viewing_changed(Device d);
+        public signal void input_admitted(Device d, string core_id, string core_name, string core_key, int port);
+
+        public const string MODE_VIEW = "view";
+        public const string MODE_INPUT = "input";
 
         public SintyScreen(owned ScreenSend send, owned ScreenAsk ask, owned ScreenName own_name, owned ScreenRoute route,
                            DBusConnection? system_bus, string binary, string state) {
@@ -110,6 +114,10 @@ namespace Singularity.Nearby {
             yield request(d, "");
         }
 
+        public InetAddress? address_of(Device d) {
+            return route(d);
+        }
+
         public void stop(Device d) {
             var p = viewers[d.id];
             if (p != null) p.send_signal(Posix.Signal.TERM);
@@ -117,18 +125,46 @@ namespace Singularity.Nearby {
 
         public void forget(Device d) {
             invites.unset(d.id);
-            requested.remove(d.id);
+            requested.unset(d.id);
             stop(d);
+        }
+
+        public bool is_core_peer(Device d) {
+            return d.paired && REQUEST in d.incoming;
+        }
+
+        public async void request_input(Device d, string input_state) throws Error {
+            string[] out = yield run({ binary, "-state", input_state, "-id" });
+            string id = out.length > 0 ? out[0].strip() : "";
+            if (id.length != 32) throw new NearbyError.FAILED(_("This device has no screen identity"));
+            requested[d.id] = MODE_INPUT;
+            send(d, new Packet(REQUEST).set_string("screen-id", id).set_string("screen-name", own_name())
+                .set_string("token", "").set_string("mode", MODE_INPUT));
+        }
+
+        public async void adopt_core(string input_state, string core_id, string core_name, string core_key) throws Error {
+            yield run({ binary, "-state", input_state, "-core-id", core_id, "-core-name", core_name, "-core-key", core_key });
         }
 
         public void handle(Device d, Packet p) {
             if (route(d) == null) return;
-            if (p.packet_type == OFFER && can_view) {
+            if (p.packet_type == OFFER && (can_view || requested[d.id] == MODE_INPUT)) {
                 if (p.get_string("core-key", "") != "") {
-                    if (!requested.remove(d.id)) return;
+                    string? mode = requested[d.id];
+                    if (mode == null) return;
+                    requested.unset(d.id);
+                    if (mode == MODE_INPUT) {
+                        string core_id = p.get_string("core-id", "");
+                        string key = p.get_string("core-key", "");
+                        int port = (int) p.get_int("port", PORT);
+                        if (core_id.length != 32 || key.length > 128 || port <= 0 || port > 65535) return;
+                        input_admitted(d, core_id, Packet.filter_name(p.get_string("core-name", d.name)), key, port);
+                        return;
+                    }
                     adopt.begin(d, p);
                     return;
                 }
+                if (!can_view) return;
                 string token = p.get_string("token", "");
                 if (token == "" || token.length > 64) return;
                 ask(_("Show %s Here?").printf(d.name), _("%s offers its desktop to this device.").printf(d.name), _("Show"), (action) => {
@@ -147,18 +183,27 @@ namespace Singularity.Nearby {
                 if (id.length != 32 || name == "" || name.length > NAME_MAX) return;
                 string token = p.get_string("token", "");
                 string? invited = invites[d.id];
-                if (token != "" && invited == token) {
+                bool input = p.get_string("mode", MODE_VIEW) == MODE_INPUT;
+                if (!input && token != "" && invited == token) {
                     invites.unset(d.id);
                     admit.begin(d, id, name);
                     return;
                 }
-                consent.begin(d, id, name);
+                consent.begin(d, id, name, input);
             }
         }
 
-        private async void consent(Device d, string id, string name) {
+        private async void consent(Device d, string id, string name, bool input) {
             if (yield trusted(id)) {
                 yield admit(d, id, name);
+                return;
+            }
+            if (input) {
+                ask(_("Use the Keyboard and Pointer of %s Here?").printf(d.name),
+                    _("%s placed this desktop beside its screens. Its pointer and keyboard will move here when they cross the edge, and this screen stays private.").printf(d.name),
+                    _("Allow"), (action) => {
+                    if (action == "accept") admit.begin(d, id, name);
+                });
                 return;
             }
             ask(_("Let %s Use This Desktop?").printf(d.name), _("%s will see this screen and control it with its keyboard and pointer.").printf(d.name), _("Allow"), (action) => {
@@ -170,7 +215,7 @@ namespace Singularity.Nearby {
             string[] out = yield run({ binary, "-state", state, "-id" });
             string id = out.length > 0 ? out[0].strip() : "";
             if (id.length != 32) throw new NearbyError.FAILED(_("This device has no screen identity"));
-            requested.add(d.id);
+            requested[d.id] = MODE_VIEW;
             send(d, new Packet(REQUEST).set_string("screen-id", id).set_string("screen-name", own_name()).set_string("token", token));
         }
 
@@ -203,8 +248,14 @@ namespace Singularity.Nearby {
                 string core_id = (yield core_property("ID")).get_string();
                 string core_name = (yield core_property("Name")).get_string();
                 string core_key = (yield core_property("PublicKey")).get_string();
+                int port = PORT;
+                try {
+                    port = (yield core_property("Port")).get_int32();
+                } catch (Error e) {
+                    debug("nearby: the Core does not say its port: %s", e.message);
+                }
                 send(d, new Packet(OFFER).set_string("core-id", core_id).set_string("core-name", core_name)
-                    .set_string("core-key", core_key).set_int("port", PORT));
+                    .set_string("core-key", core_key).set_int("port", port));
             } catch (Error e) {
                 failed(d, e.message);
             }
@@ -224,7 +275,7 @@ namespace Singularity.Nearby {
                 string address = peer.get_family() == SocketFamily.IPV6
                     ? "[%s]:%d".printf(peer.to_string(), port)
                     : "%s:%d".printf(peer.to_string(), port);
-                var proc = new Subprocess.newv({ binary, "-window", "-state", state, "-core", address, "-name", own_name(), "-layout", layout() },
+                var proc = new Subprocess.newv({ binary, "-window", "-state", state, "-core", address, "-name", own_name(), "-layout", keyboard_layout() },
                     SubprocessFlags.NONE);
                 viewers[d.id] = proc;
                 viewing_changed(d);
@@ -243,7 +294,7 @@ namespace Singularity.Nearby {
             }
         }
 
-        private static string layout() {
+        public static string keyboard_layout() {
             var source = SettingsSchemaSource.get_default();
             var schema = source != null ? source.lookup("dev.sinty.desktop", true) : null;
             if (schema == null || !schema.has_key("xkb-layout")) return "us";

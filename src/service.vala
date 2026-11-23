@@ -37,6 +37,7 @@ namespace Singularity.Nearby {
         private Gee.ArrayList<TransferInfo> transfers = new Gee.ArrayList<TransferInfo>();
         private SintyAi sinty_ai;
         private SintyScreen screen;
+        private InputShare input;
         private Gee.HashMap<string, RelayClient> relays = new Gee.HashMap<string, RelayClient>();
 
         [DBus (visible = false)]
@@ -54,6 +55,7 @@ namespace Singularity.Nearby {
         public signal void notifications_changed(string device_id);
         public signal void transfer_started(string transfer_id, string device_id, string name, int64 size, bool incoming);
         public signal void received_files_changed();
+        public signal void edge_pushed(string output, string side, double position, double length);
 
         public string id { owned get { return config.device_id; } }
         public string name {
@@ -155,6 +157,18 @@ namespace Singularity.Nearby {
             screen.failed.connect((d, message) => {
                 desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Share the Screen with %s").printf(d.name), message, {});
             });
+            input = new InputShare(screen, () => devices.values, () => config.device_name,
+                Environment.get_variable("SINTY_SCREEN_BINARY") ?? "/usr/bin/sinty-screen",
+                Path.build_filename(Environment.get_user_data_dir(), "sinty-screen", "input"), config.dir);
+            input.changed.connect((id) => {
+                if (devices.has_key(id)) device_changed(id);
+            });
+            input.pushed.connect((output, side, position, length) => edge_pushed(output, side, position, length));
+            input.failed.connect((d, message) => {
+                desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Place %s Beside This Screen").printf(d.name), message, {});
+            });
+            devices_changed.connect(() => input.refresh());
+            screen.capabilities_changed.connect(() => input.refresh());
             sinty_ai.wake.connect((d, kind) => {
                 var relay = relays[d.id];
                 if (relay != null && d.record != null) relay.push.begin(d.record.push_token, kind);
@@ -197,6 +211,7 @@ namespace Singularity.Nearby {
         [DBus (visible = false)]
         public void start() throws Error {
             lan.start();
+            input.refresh();
             refresh_relays();
             lan.set_discoverable(config.discoverable);
             refresh_discovery();
@@ -582,6 +597,7 @@ namespace Singularity.Nearby {
         private void untrust(Device d) {
             sinty_ai.forget(d);
             screen.forget(d);
+            input.forget_device(d);
             if (d.record != null) {
                 d.record.room_secret = "";
                 d.record.push_token = "";
@@ -1050,6 +1066,15 @@ namespace Singularity.Nearby {
             dict["can-show-desktop-on"] = screen.can_show_on(d);
             dict["can-show-desktop-of"] = screen.can_show_from(d);
             dict["showing-desktop-of"] = screen.showing(d);
+            dict["can-share-input"] = input.can_place(d);
+            var place = input.place_of(d);
+            if (place != null) {
+                dict["input-output"] = place.output;
+                dict["input-side"] = place.side;
+                dict["input-start"] = place.start;
+                dict["input-end"] = place.end;
+                dict["input-state"] = place.state;
+            }
             return dict;
         }
 
@@ -1104,6 +1129,14 @@ namespace Singularity.Nearby {
 
         public async void show_desktop_of(string id) throws Error {
             yield screen.show_from(require_paired(id));
+        }
+
+        public void place_input(string id, string output, string side, int start, int end) throws NearbyError, DBusError, IOError {
+            input.place(require_paired(id), output, side, start, end);
+        }
+
+        public void remove_input(string id) throws DBusError, IOError {
+            input.remove(id);
         }
 
         public void stop_desktop_of(string id) throws NearbyError, DBusError, IOError {

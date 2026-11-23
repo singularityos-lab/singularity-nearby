@@ -50,6 +50,7 @@ service_sources = core_sources + files(
     'src/collab.vala',
     'src/relay.vala',
     'src/screen.vala',
+    'src/input_share.vala',
 )
 
 executable('singularity-nearby',
