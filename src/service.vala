@@ -38,9 +38,11 @@ namespace Singularity.Nearby {
         private SintyAi sinty_ai;
         private SintyScreen screen;
         private AppMove app_move;
+        private AppCast app_cast;
         private string? dragged_device = null;
         private string? dragged_app = null;
-        private bool dragged_movable = false;
+        private string dragged_mode = "";
+        private int dragged_pid = 0;
         private uint drag_serial = 0;
         private InputShare input;
         private Gee.HashMap<string, RelayClient> relays = new Gee.HashMap<string, RelayClient>();
@@ -62,7 +64,7 @@ namespace Singularity.Nearby {
         public signal void transfer_started(string transfer_id, string device_id, string name, int64 size, bool incoming);
         public signal void received_files_changed();
         public signal void edge_pushed(string output, string side, double position, double length);
-        public signal void app_dragged(string device_id, string app_id, string state, bool movable, string output, string side, double position);
+        public signal void app_dragged(string device_id, string app_id, string state, string mode, string output, string side, double position);
 
         public string id { owned get { return config.device_id; } }
         public string name {
@@ -175,7 +177,7 @@ namespace Singularity.Nearby {
                 desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Place %s Beside This Screen").printf(d.name), message, {});
             });
             input.window_dragged.connect((id, state, app_id, pid, output, side, fraction) => {
-                window_dragged.begin(id, state, app_id, output, side, fraction);
+                window_dragged.begin(id, state, app_id, pid, output, side, fraction);
             });
             devices_changed.connect(() => input.refresh());
             screen.capabilities_changed.connect(() => input.refresh());
@@ -188,6 +190,14 @@ namespace Singularity.Nearby {
             app_move.progress.connect((tid, done, total) => transfer_progress(tid, done, total));
             app_move.finished.connect((tid, ok, message) => transfer_finished(tid, ok, message));
             app_move.arrived.connect((d, app_id) => app_arrived(d.id, app_id));
+            app_cast = new AppCast((d, p) => send(d, p), (d) => d.link != null && !d.link.relayed ? d.link.address : null, config,
+                Environment.get_variable("SINTY_SCREEN_BINARY") ?? "/usr/bin/sinty-screen");
+            app_cast.started.connect((tid, d, app_id, incoming) => {
+                string name = app_label(app_id);
+                track(tid, d.id, name, 0, incoming);
+                transfer_started(tid, d.id, name, 0, incoming);
+            });
+            app_cast.finished.connect((tid, ok, message) => transfer_finished(tid, ok, message));
             sinty_ai.wake.connect((d, kind) => {
                 var relay = relays[d.id];
                 if (relay != null && d.record != null) relay.push.begin(d.record.push_token, kind);
@@ -267,6 +277,7 @@ namespace Singularity.Nearby {
             p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), SintyAi.INCOMING));
             if (screen != null) p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), screen.incoming()));
             if (app_move != null) p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), app_move.capabilities()));
+            if (app_cast != null) p.set_strv("incomingCapabilities", append_all(p.get_strv("incomingCapabilities"), app_cast.capabilities()));
             if (collab != null && collab.enabled) {
                 p.set_strv("incomingCapabilities", append(p.get_strv("incomingCapabilities"), LanTransport.PACKET));
             }
@@ -279,6 +290,7 @@ namespace Singularity.Nearby {
             p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), SintyAi.OUTGOING));
             if (screen != null) p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), screen.outgoing()));
             if (app_move != null) p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), app_move.capabilities()));
+            if (app_cast != null) p.set_strv("outgoingCapabilities", append_all(p.get_strv("outgoingCapabilities"), app_cast.capabilities()));
             if (collab != null && collab.enabled) {
                 p.set_strv("outgoingCapabilities", append(p.get_strv("outgoingCapabilities"), LanTransport.PACKET));
             }
@@ -348,6 +360,7 @@ namespace Singularity.Nearby {
                 if (d.link != link) return;
                 d.link = null;
                 app_move.forget(d);
+                app_cast.forget(d);
                 if (d.pair_state == PairState.REQUESTED || d.pair_state == PairState.INCOMING) end_pairing(d, PairState.NONE);
                 foreach (var n in d.notifications.values) desktop.close(n.local_id);
                 d.notifications.clear();
@@ -513,6 +526,10 @@ namespace Singularity.Nearby {
                 case AppMove.RESULT:
                     app_move.handle(d, p);
                     break;
+                case AppCast.OFFER:
+                case AppCast.RESULT:
+                    app_cast.handle(d, p);
+                    break;
                 case SintyAi.PUSH:
                     if (d.plugin_enabled(SintyAi.PLUGIN, system) && d.record != null) {
                         string token = p.get_string("token", "") ?? "";
@@ -624,6 +641,7 @@ namespace Singularity.Nearby {
             sinty_ai.forget(d);
             screen.forget(d);
             app_move.forget(d);
+            app_cast.forget(d);
             input.forget_device(d);
             if (d.record != null) {
                 d.record.room_secret = "";
@@ -1094,6 +1112,7 @@ namespace Singularity.Nearby {
             dict["can-show-desktop-of"] = screen.can_show_from(d);
             dict["showing-desktop-of"] = screen.showing(d);
             dict["can-move-apps"] = app_move.can_move_to(d);
+            dict["can-show-apps"] = app_cast.can_cast_to(d);
             dict["can-share-input"] = input.can_place(d);
             var place = input.place_of(d);
             if (place != null) {
@@ -1173,55 +1192,76 @@ namespace Singularity.Nearby {
 
         public string move_app(string id, string app_id) throws NearbyError, DBusError, IOError {
             var d = require_paired(id);
-            if (!app_move.can_move_to(d)) throw new NearbyError.NOT_REACHABLE(_("%s cannot take apps from this device").printf(d.name));
+            if (!app_move.can_move_to(d) && !app_cast.can_cast_to(d)) throw new NearbyError.NOT_REACHABLE(_("%s cannot take apps from this device").printf(d.name));
             if (!GLib.Application.id_is_valid(app_id)) throw new NearbyError.FAILED(_("This app cannot move"));
             string tid = Uuid.string_random();
-            app_move.move.begin(d, tid, app_id, (o, r) => {
-                try {
-                    app_move.move.end(r);
-                } catch (Error e) {
-                    desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Move %s to %s").printf(app_label(app_id), d.name), e.message, {});
-                }
-            });
+            relocate.begin(d, tid, app_id, 0);
             return tid;
         }
 
-        private async void window_dragged(string id, string state, string app_id, string output, string side, double fraction) {
+        private async string mode_for(Device d, string app_id, int pid) {
+            if (pid > 0 && app_cast.shows(pid)) return "close";
+            if (app_move.can_move_to(d) && yield app_move.supports(app_id)) return "move";
+            if (app_cast.can_cast_to(d)) return "cast";
+            return "";
+        }
+
+        private async void relocate(Device d, string tid, string app_id, int pid) {
+            string mode = yield mode_for(d, app_id, pid);
+            try {
+                switch (mode) {
+                    case "move":
+                        yield app_move.move(d, tid, app_id);
+                        break;
+                    case "cast":
+                        yield app_cast.cast(d, tid, app_id, pid, app_label(app_id));
+                        break;
+                    case "close":
+                        app_cast.close_shown(pid);
+                        break;
+                    default:
+                        throw new NearbyError.FAILED(_("This app cannot continue on another device."));
+                }
+            } catch (Error e) {
+                desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Move %s to %s").printf(app_label(app_id), d.name), e.message, {});
+            }
+        }
+
+        private async void window_dragged(string id, string state, string app_id, int pid, string output, string side, double fraction) {
             if (state == "entered") {
                 var d = devices[id];
                 var place = d != null ? input.place_of(d) : null;
                 double position = place != null ? place.start + fraction * (place.end - place.start) : 0;
                 dragged_device = id;
                 dragged_app = app_id;
-                dragged_movable = false;
+                dragged_mode = "";
+                dragged_pid = pid;
                 uint serial = ++drag_serial;
-                bool movable = d != null && app_move.can_move_to(d) && yield app_move.supports(app_id);
+                string mode = d != null ? yield mode_for(d, app_id, pid) : "";
                 if (serial != drag_serial) return;
-                dragged_movable = movable;
-                app_dragged(id, app_id, state, movable, output, side, position);
+                dragged_mode = mode;
+                app_dragged(id, app_id, state, mode, output, side, position);
                 return;
             }
             if (dragged_device != id || dragged_app == null) return;
             string app = dragged_app;
-            bool movable = dragged_movable;
+            string mode = dragged_mode;
+            int app_pid = dragged_pid;
             drag_serial++;
             dragged_device = null;
             dragged_app = null;
-            dragged_movable = false;
-            app_dragged(id, app, state, movable, "", "", 0);
+            dragged_mode = "";
+            dragged_pid = 0;
+            app_dragged(id, app, state, mode, "", "", 0);
             if (state != "dropped") return;
             var d = devices[id];
             if (d == null) return;
-            if (!movable) {
+            if (mode == "") {
                 desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Move %s to %s").printf(app_label(app), d.name),
                     _("This app cannot continue on another device."), {});
                 return;
             }
-            try {
-                move_app(id, app);
-            } catch (Error e) {
-                desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, _("Cannot Move %s to %s").printf(app_label(app), d.name), e.message, {});
-            }
+            relocate.begin(d, Uuid.string_random(), app, app_pid);
         }
 
         private static string app_label(string app_id) {

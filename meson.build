@@ -51,6 +51,7 @@ service_sources = core_sources + files(
     'src/relay.vala',
     'src/screen.vala',
     'src/app_move.vala',
+    'src/app_cast.vala',
     'src/input_share.vala',
 )
 
@@ -113,6 +114,15 @@ app_move_test = executable('nearby-app-move-test',
   vala_args: vala_args,
 )
 test('nearby-app-move', app_move_test, env: ['TMPDIR=' + meson.current_build_dir()], timeout: 300)
+
+app_cast_test = executable('nearby-app-cast-test',
+  service_sources + files('tests/app_cast_test.vala'),
+  dependencies: deps,
+  link_with: helpers,
+  include_directories: include_directories('src'),
+  vala_args: vala_args,
+)
+test('nearby-app-cast', app_cast_test, env: ['TMPDIR=' + meson.current_build_dir()], timeout: 120)
 
 collab_test = executable('nearby-collab-test',
   service_sources + files('tests/collab_test.vala'),
