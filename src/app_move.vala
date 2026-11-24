@@ -79,10 +79,41 @@ namespace Singularity.Nearby {
             return string.join("\n", OFFER, sender, receiver, transfer, app_id);
         }
 
+        public static string alias(string app_id) {
+            return app_id + ".Migration";
+        }
+
+        private async bool has_owner(string name) {
+            try {
+                var reply = yield bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
+                    new Variant("(s)", name), new VariantType("(b)"), DBusCallFlags.NONE, 2000, null);
+                return reply.get_child_value(0).get_boolean();
+            } catch (Error e) {
+                return false;
+            }
+        }
+
+        private async bool exports(string name, string app_id) {
+            try {
+                yield bus.call(name, object_path(app_id), "org.freedesktop.DBus.Properties", "GetAll",
+                    new Variant("(s)", INTERFACE), new VariantType("(a{sv})"), DBusCallFlags.NO_AUTO_START, 2000, null);
+                return true;
+            } catch (Error e) {
+                return false;
+            }
+        }
+
+        public async string address(string app_id) {
+            string a = alias(app_id);
+            if (yield has_owner(a)) return a;
+            return app_id;
+        }
+
         public async bool supports(string app_id) {
             if (!GLib.Application.id_is_valid(app_id)) return false;
             try {
-                var reply = yield bus.call(app_id, object_path(app_id), "org.freedesktop.DBus.Properties", "Get",
+                string target = yield address(app_id);
+                var reply = yield bus.call(target, object_path(app_id), "org.freedesktop.DBus.Properties", "Get",
                     new Variant("(ss)", INTERFACE, "Available"), new VariantType("(v)"), DBusCallFlags.NO_AUTO_START, 2000, null);
                 return reply.get_child_value(0).get_variant().get_boolean();
             } catch (Error e) {
@@ -92,7 +123,8 @@ namespace Singularity.Nearby {
 
         public async Bytes seal(Device d, string transfer, string app_id) throws Error {
             if (!GLib.Application.id_is_valid(app_id)) throw new NearbyError.FAILED(_("This app cannot move"));
-            var reply = yield bus.call(app_id, object_path(app_id), INTERFACE, "Capture", null,
+            string target = yield address(app_id);
+            var reply = yield bus.call(target, object_path(app_id), INTERFACE, "Capture", null,
                 new VariantType("(v)"), DBusCallFlags.NO_AUTO_START, 30000, null);
             var state = reply.get_child_value(0).get_variant();
             if (!state.is_of_type(new VariantType("(usvasa(svvi))"))) throw new NearbyError.FAILED(_("The app sent a state this device does not understand"));
@@ -158,7 +190,8 @@ namespace Singularity.Nearby {
 
         private async void release(string app_id) {
             try {
-                yield bus.call(app_id, object_path(app_id), INTERFACE, "Release", null, null, DBusCallFlags.NO_AUTO_START, 10000, null);
+                string target = yield address(app_id);
+                yield bus.call(target, object_path(app_id), INTERFACE, "Release", null, null, DBusCallFlags.NO_AUTO_START, 10000, null);
             } catch (Error e) {
                 warning("nearby: %s moved but did not close here: %s", app_id, e.message);
             }
@@ -389,27 +422,25 @@ namespace Singularity.Nearby {
         }
 
         private async void restore(string app_id, Variant state) throws Error {
-            Variant reply;
-            try {
-                reply = yield call_restore(app_id, state, DBusCallFlags.NONE);
-            } catch (DBusError e) {
-                if (!(e is DBusError.SERVICE_UNKNOWN) && !(e is DBusError.NAME_HAS_NO_OWNER) && !(e is DBusError.SPAWN_SERVICE_NOT_FOUND)) throw e;
+            string target = yield address(app_id);
+            if (!(yield exports(target, app_id))) {
                 yield launch(app_id);
-                reply = yield call_restore(app_id, state, DBusCallFlags.NO_AUTO_START);
+                target = yield address(app_id);
             }
+            var reply = yield call_restore(target, app_id, state);
             string[] differences = reply.get_child_value(0).get_strv();
             if (differences.length > 0) {
                 try {
-                    yield bus.call(app_id, object_path(app_id), INTERFACE, "Release", null, null, DBusCallFlags.NO_AUTO_START, 10000, null);
+                    yield bus.call(target, object_path(app_id), INTERFACE, "Release", null, null, DBusCallFlags.NO_AUTO_START, 10000, null);
                 } catch (Error e) {
                 }
                 throw new NearbyError.FAILED(_("The app could not be rebuilt exactly here"));
             }
         }
 
-        private async Variant call_restore(string app_id, Variant state, DBusCallFlags flags) throws Error {
-            return yield bus.call(app_id, object_path(app_id), INTERFACE, "Restore", new Variant("(v)", state),
-                new VariantType("(as)"), flags, 120000, null);
+        private async Variant call_restore(string target, string app_id, Variant state) throws Error {
+            return yield bus.call(target, object_path(app_id), INTERFACE, "Restore", new Variant("(v)", state),
+                new VariantType("(as)"), DBusCallFlags.NO_AUTO_START, 120000, null);
         }
 
         private async void launch(string app_id) throws Error {
@@ -417,7 +448,15 @@ namespace Singularity.Nearby {
             string? exe = info != null ? info.get_executable() : null;
             if (exe == null || Environment.find_program_in_path(exe) == null) throw new NearbyError.FAILED(_("This app is not installed here"));
             bool up = false;
-            uint watch = Bus.watch_name_on_connection(bus, app_id, BusNameWatcherFlags.NONE, () => {
+            bool taken = yield has_owner(app_id);
+            uint watch = 0;
+            uint watch_alias = Bus.watch_name_on_connection(bus, alias(app_id), BusNameWatcherFlags.NONE, () => {
+                if (up) return;
+                up = true;
+                launch.callback();
+            }, null);
+            if (!taken) watch = Bus.watch_name_on_connection(bus, app_id, BusNameWatcherFlags.NONE, () => {
+                if (up) return;
                 up = true;
                 launch.callback();
             }, null);
@@ -432,7 +471,8 @@ namespace Singularity.Nearby {
                 launcher.spawnv({ Environment.find_program_in_path(exe), "--gapplication-service" });
                 if (!up) yield;
             } finally {
-                Bus.unwatch_name(watch);
+                if (watch != 0) Bus.unwatch_name(watch);
+                Bus.unwatch_name(watch_alias);
                 if (timer != 0) Source.remove(timer);
             }
             if (!up) throw new NearbyError.FAILED(_("The app did not start here"));

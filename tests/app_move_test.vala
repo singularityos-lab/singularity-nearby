@@ -45,6 +45,7 @@ class Side {
     public FakeApp app;
     public Gee.HashMap<string, Device> peers = new Gee.HashMap<string, Device>();
     public Gee.ArrayList<string> results = new Gee.ArrayList<string>();
+    public DBusConnection? decoy = null;
 }
 
 class MemoryPayload : Object, MovePayload {
@@ -123,7 +124,7 @@ DBusConnection connect_bus(string address) {
     }
 }
 
-Side make_side(string root, string name, string text, string[] files) {
+Side make_side(string root, string name, string text, string[] files, bool shared_name = false) {
     var s = new Side();
     string dir = Path.build_filename(root, name);
     s.home = Path.build_filename(dir, "home");
@@ -140,8 +141,14 @@ Side make_side(string root, string name, string text, string[] files) {
     var app_bus = connect_bus(address);
     try {
         app_bus.register_object(AppMove.object_path(APP), s.app);
+        if (shared_name) {
+            var other = connect_bus(address);
+            other.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
+                new Variant("(su)", APP, 4), null, DBusCallFlags.NONE, -1, null);
+            s.decoy = other;
+        }
         app_bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
-            new Variant("(su)", APP, 4), null, DBusCallFlags.NONE, -1, null);
+            new Variant("(su)", shared_name ? AppMove.alias(APP) : APP, 4), null, DBusCallFlags.NONE, -1, null);
     } catch (Error e) {
         error(e.message);
     }
@@ -422,6 +429,16 @@ int main(string[] args) {
     failure = run_move(laptop, studio);
     laptop.move.disconnect(forger);
     check(failure != null && laptop.app.releases == 0, "only the receiving device can confirm a move");
+
+    var phone = make_side(root, "phone", "Note typed on the phone", {}, true);
+    var tablet = make_side(root, "tablet", "", {}, true);
+    pair(phone, tablet);
+    pair(tablet, phone);
+    reset();
+    failure = run_move(phone, tablet);
+    check(failure == null, "an app whose id is owned by another process moves through its migration name (%s)".printf(failure ?? "no error"));
+    check(tablet.app.restored != null && tablet.app.restored.equal(phone.app.state), "the app behind the migration name receives the state");
+    check(phone.app.releases == 1, "the app behind the migration name is released after the move");
 
     print(failures == 0 ? "all ok\n" : "%d failures\n".printf(failures));
     return failures == 0 ? 0 : 1;
