@@ -195,6 +195,7 @@ namespace Singularity.Nearby {
             app_move.arrived.connect((d, app_id) => app_arrived(d.id, app_id));
             app_cast = new AppCast((d, p) => send(d, p), (d) => d.link != null && !d.link.relayed ? d.link.address : null, config,
                 Environment.get_variable("SINTY_SCREEN_BINARY") ?? "/usr/bin/sinty-screen");
+            app_cast.listen = ":%d-%d".printf(system.transfer_port_min, system.transfer_port_max);
             app_cast.started.connect((tid, d, app_id, incoming) => {
                 string name = app_label(app_id);
                 track(tid, d.id, name, 0, incoming);

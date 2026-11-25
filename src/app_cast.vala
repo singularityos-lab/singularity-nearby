@@ -15,6 +15,7 @@ namespace Singularity.Nearby {
         private CastAddress address;
         private UserConfig config;
         private string binary;
+        public string listen { get; set; default = ":0"; }
         private Gee.HashMap<string, Pending> waiting = new Gee.HashMap<string, Pending>();
         private Gee.HashMap<string, int64?> seen = new Gee.HashMap<string, int64?>();
         private Gee.HashSet<string> busy = new Gee.HashSet<string>();
@@ -182,7 +183,7 @@ namespace Singularity.Nearby {
             started(transfer, d, app_id, false);
             Helper? h = null;
             try {
-                h = spawn("out/" + transfer, d.id, { binary, "-cast-serve", "-app", app_id, "-pid", pid.to_string(), "-listen", ":0" }, true);
+                h = spawn("out/" + transfer, d.id, { binary, "-cast-serve", "-app", app_id, "-pid", pid.to_string(), "-listen", listen }, true);
                 var ready = yield next_event(h, READY_TIMEOUT);
                 if (ready.get_string_member("event") != "ready") throw new NearbyError.FAILED(_("The app cannot be shown on another device"));
                 var body = new Json.Builder();

@@ -86,6 +86,7 @@ if get_option('autostart')
   )
 endif
 install_data('data/nearby.conf', install_dir: get_option('sysconfdir') / 'singularity')
+install_data('data/nearby.firewall.json', rename: 'nearby.json', install_dir: get_option('datadir') / 'sinty-firewalld' / 'services')
 install_data('data/dev.sinty.Collab1.ini', install_dir: get_option('datadir') / 'singularity' / 'capabilities')
 
 packet_test = executable('nearby-packet-test',
