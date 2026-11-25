@@ -26,6 +26,7 @@ namespace Singularity.Nearby {
         private Gee.HashMap<string, string> invites = new Gee.HashMap<string, string>();
         private Gee.HashMap<string, string> requested = new Gee.HashMap<string, string>();
         private Gee.HashMap<string, Subprocess> viewers = new Gee.HashMap<string, Subprocess>();
+        private Gee.HashSet<string> asking = new Gee.HashSet<string>();
 
         public signal void capabilities_changed();
         public signal void failed(Device d, string message);
@@ -198,17 +199,20 @@ namespace Singularity.Nearby {
                 yield admit(d, id, name);
                 return;
             }
+            string key = d.id + "/" + id;
+            if (key in asking) return;
+            asking.add(key);
+            NotificationAction answer = (action) => {
+                asking.remove(key);
+                if (action == "accept") admit.begin(d, id, name);
+            };
             if (input) {
                 ask(_("Use the Keyboard and Pointer of %s Here?").printf(d.name),
                     _("%s placed this desktop beside its screens. Its pointer and keyboard will move here when they cross the edge, and this screen stays private.").printf(d.name),
-                    _("Allow"), (action) => {
-                    if (action == "accept") admit.begin(d, id, name);
-                });
+                    _("Allow"), (owned) answer);
                 return;
             }
-            ask(_("Let %s Use This Desktop?").printf(d.name), _("%s will see this screen and control it with its keyboard and pointer.").printf(d.name), _("Allow"), (action) => {
-                if (action == "accept") admit.begin(d, id, name);
-            });
+            ask(_("Let %s Use This Desktop?").printf(d.name), _("%s will see this screen and control it with its keyboard and pointer.").printf(d.name), _("Allow"), (owned) answer);
         }
 
         private async void request(Device d, string token) throws Error {

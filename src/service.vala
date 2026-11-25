@@ -154,7 +154,10 @@ namespace Singularity.Nearby {
                 var hints = new HashTable<string, Variant>(str_hash, str_equal);
                 hints["urgency"] = new Variant.byte(2);
                 desktop.send_notification.begin(_("Nearby"), Desktop.APP_ID, summary, body,
-                    { "accept", allow, "decline", _("Not Now") }, hints, 0, (owned) answer);
+                    { "accept", allow, "decline", _("Not Now") }, hints, 0, (action) => answer(action), null,
+                    (reason) => answer("closed"), -1, (o, r) => {
+                        if (desktop.send_notification.end(r) == 0) answer("closed");
+                    });
             }, () => config.device_name, (d) => d.link != null && !d.link.relayed ? d.link.address : null, system_bus(),
                 Environment.get_variable("SINTY_SCREEN_BINARY") ?? "/usr/bin/sinty-screen",
                 Path.build_filename(Environment.get_user_data_dir(), "sinty-screen"));

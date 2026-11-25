@@ -51,6 +51,8 @@ string log_path;
 int core_asked = 0;
 int viewer_asked = 0;
 bool core_answers = true;
+bool core_holds = false;
+NotificationAction? held_answer = null;
 string[] failures;
 
 Device paired_device(string id, string name, string[] incoming) {
@@ -186,6 +188,36 @@ void test_unasked_offers_and_forged_invites_do_nothing() {
     core_answers = true;
 }
 
+void test_a_screen_waiting_for_consent_is_asked_about_once() {
+    core.ids.clear();
+    core.names.clear();
+    core.admitted = 0;
+    core_asked = 0;
+    core_holds = true;
+    var request = new Packet(SintyScreen.REQUEST).set_string("screen-id", SCREEN_ID)
+        .set_string("screen-name", "Laptop").set_string("token", "").set_string("mode", SintyScreen.MODE_INPUT);
+    core_side.handle(viewer_seen_by_core, request);
+    core_side.handle(viewer_seen_by_core, request);
+    settle();
+    assert(core_asked == 1);
+    assert(core.admitted == 0);
+
+    held_answer("closed");
+    core_side.handle(viewer_seen_by_core, request);
+    settle();
+    assert(core_asked == 2);
+
+    held_answer("accept");
+    held_answer("closed");
+    wait_until(() => core.admitted == 1);
+    assert(core.admitted == 1);
+    core_holds = false;
+    core_side.handle(viewer_seen_by_core, request);
+    wait_until(() => core.admitted == 2);
+    assert(core_asked == 2);
+    assert(core.admitted == 2);
+}
+
 int main(string[] args) {
     Test.init(ref args);
     failures = {};
@@ -224,6 +256,10 @@ int main(string[] args) {
     core_side = new SintyScreen((d, p) => relay(core_seen_by_viewer, viewer_side, p),
         (summary, body, allow, answer) => {
             core_asked++;
+            if (core_holds) {
+                held_answer = (owned) answer;
+                return;
+            }
             answer(core_answers ? "accept" : "decline");
         },
         () => "Living Room", (d) => loopback, bus, "/nonexistent/sinty-screen", Path.build_filename(dir, "core"));
@@ -245,6 +281,7 @@ int main(string[] args) {
     Test.add_func("/screen/asks-once", test_a_screen_asks_once_then_is_remembered);
     Test.add_func("/screen/core-offers", test_the_core_offers_itself);
     Test.add_func("/screen/unasked", test_unasked_offers_and_forged_invites_do_nothing);
+    Test.add_func("/screen/consent-once", test_a_screen_waiting_for_consent_is_asked_about_once);
     int result = Test.run();
     assert(failures.length == 0);
     return result;
