@@ -168,7 +168,7 @@ namespace Singularity.Nearby {
             if (!accept(device_id)) return;
             if (connecting.contains(device_id)) return;
             var current = links[device_id];
-            if (current != null && current.open) return;
+            if (current != null && current.open && current.address.equal(address)) return;
             connect_to.begin(address, port, device_id, protocol);
         }
 
@@ -295,6 +295,7 @@ namespace Singularity.Nearby {
                 conn.socket.set_option(6, 4, 30);
                 conn.socket.set_option(6, 5, 10);
                 conn.socket.set_option(6, 6, 3);
+                conn.socket.set_option(6, 18, 40000);
             } catch (Error e) {
             }
         }
